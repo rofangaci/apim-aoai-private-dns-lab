@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+APIM_HOST="${APIM_HOST:-<apim-name>.azure-api.net}"
+DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-<aoai-deployment-name>}"
+
+curl -k -sS -X POST "https://${APIM_HOST}/aoai4o/deployments/${DEPLOYMENT_NAME}/chat/completions?api-version=2024-10-21" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Happy Good Friday today"}],"max_completion_tokens":40,"temperature":0}' | jq

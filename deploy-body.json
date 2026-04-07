@@ -1,0 +1,13 @@
+{
+  "sku": {
+    "capacity": 1,
+    "name": "standard"
+  },
+  "properties": {
+    "model": {
+      "version": "2024-11-20",
+      "format": "OpenAI",
+      "name": "gpt-4o"
+    }
+  }
+}
