@@ -21,23 +21,40 @@
 #>
 
 param(
-    [string]$Subscription = '<subscription-id-or-name>',
-    [string]$ResourceGroup = '<resource-group-name>',
-    [string]$ApimName = '<apim-service-name>',
-    [string]$AoaiName = '<aoai-account-name>',
-    [string]$AoaiDeploymentName = 'gpt-4o-mini-demo',
-    [string]$JumpboxName = '<jumpbox-vm-name>',
-    [string]$JumpboxPrivateIp = '<jumpbox-private-ip>',
-    [string]$ApimPrivateVip = '<apim-private-vip>',
-    [string]$AoaiPrivateEndpointIp = '<aoai-private-endpoint-ip>',
+    [Parameter(Mandatory)]
+    [string]$Subscription,
+
+    [Parameter(Mandatory)]
+    [string]$ResourceGroup,
+
+    [Parameter(Mandatory)]
+    [string]$ApimName,
+
+    [Parameter(Mandatory)]
+    [string]$AoaiName,
+
+    [Parameter(Mandatory)]
+    [string]$JumpboxName,
+
+    [Parameter(Mandatory)]
+    [string]$JumpboxPrivateIp,
+
+    [Parameter(Mandatory)]
+    [string]$ApimPrivateVip,
+
+    [Parameter(Mandatory)]
+    [string]$AoaiPrivateEndpointIp,
+
+    [string]$AoaiDeploymentName = 'gpt4o-demo',
+
+    # APIM API ID and path as deployed by the Bicep + import step
+    [string]$ApimApiId = 'aoai-4o',
+    [string]$ApimApiPath = 'aoai4o',
+
     [string]$UserMessage = 'Happy Friday or any msg you like'
 )
 
 $ErrorActionPreference = 'Stop'
-
-if ($Subscription -like '<*' -or $ResourceGroup -like '<*' -or $ApimName -like '<*' -or $AoaiName -like '<*' -or $JumpboxName -like '<*' -or $JumpboxPrivateIp -like '<*' -or $ApimPrivateVip -like '<*' -or $AoaiPrivateEndpointIp -like '<*') {
-    Write-Error 'Update all placeholder parameters before running this script.'
-}
 
 az account set --subscription $Subscription | Out-Null
 
@@ -78,9 +95,8 @@ Write-Host "  Network: Private Endpoint + Private DNS"
 # ─────────────────────────────────────────────────────────────────────────────
 Write-Host "`n📋 SECTION 2: APIM API Proxy Configuration" -ForegroundColor Cyan
 
-$api = az apim api show -g $ResourceGroup --service-name $ApimName --api-id aoai-proxy --query "{apiId:name, path:path, serviceUrl:serviceUrl, protocols:protocols[0]}" -o json | ConvertFrom-Json
-$ops = az apim api operation list -g $ResourceGroup --service-name $ApimName --api-id aoai-proxy --query "[].{id:name, method:method, urlTemplate:urlTemplate}" -o json | ConvertFrom-Json
-$nv = az apim nv show -g $ResourceGroup --service-name $ApimName --named-value-id aoai-api-key --query "{id:name, displayName:displayName}" -o json | ConvertFrom-Json
+$api = az apim api show -g $ResourceGroup --service-name $ApimName --api-id $ApimApiId --query "{apiId:name, path:path, serviceUrl:serviceUrl, protocols:protocols[0]}" -o json | ConvertFrom-Json
+$ops = az apim api operation list -g $ResourceGroup --service-name $ApimName --api-id $ApimApiId --query "[].{id:name, method:method, urlTemplate:urlTemplate}" -o json | ConvertFrom-Json
 
 Write-Host "`n✓ API Proxy: $($api.apiId)"
 Write-Host "  Base Path: /$($api.path)"
@@ -93,11 +109,9 @@ foreach ($op in $ops) {
     Write-Host "    → Routed to: $($api.serviceUrl)$($op.urlTemplate -replace '{deploymentId}', '<deployment-name>')"
 }
 
-Write-Host "`n✓ Security: Named Value for API Key"
-Write-Host "  Named Value ID: $($nv.id)"
-Write-Host "  Display Name: $($nv.displayName)"
-Write-Host "  Secret: Yes (encrypted)"
-Write-Host "  → Injected via policy: Authorization: Bearer {{aoai-api-key}}"
+Write-Host "`n✓ Security: Managed Identity (no API key required)"
+Write-Host "  APIM system-assigned identity is granted Cognitive Services OpenAI User on AOAI"
+Write-Host "  → Token injected via APIM inbound policy: authentication-managed-identity"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 3: Test from Jumpbox - DNS Resolution
@@ -134,7 +148,7 @@ Write-Host "`n📋 SECTION 4: HTTP Connectivity Test (Jumpbox → APIM)" -Foregr
 
 Write-Host "`nTest: POST request to APIM proxy endpoint..."
 Write-Host "  Deployment Name: $AoaiDeploymentName"
-Write-Host "  Request: POST https://$apimGatewayHost/aoai/openai/deployments/$AoaiDeploymentName/chat/completions"
+Write-Host "  Request: POST https://$apimGatewayHost/$ApimApiPath/deployments/$AoaiDeploymentName/chat/completions"
 Write-Host "  User Message: $UserMessage"
 
 $requestBody = @{
@@ -148,7 +162,7 @@ $requestBody = @{
     temperature = 0
 } | ConvertTo-Json -Compress
 
-$chatUrl = "https://$apimGatewayHost/aoai/openai/deployments/$AoaiDeploymentName/chat/completions"
+$chatUrl = "https://$apimGatewayHost/$ApimApiPath/deployments/$AoaiDeploymentName/chat/completions"
 
 $curlScript = @"
 cat > /tmp/payload.json <<'JSON'
@@ -185,27 +199,29 @@ if ($httpTest -match '200|201|400') {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECTION 5: Show APIM Policy (API Key Injection)
+# SECTION 5: Show APIM Policy (Managed Identity Auth)
 # ─────────────────────────────────────────────────────────────────────────────
-Write-Host "`n📋 SECTION 5: APIM Inbound Policy (API Key Injection)" -ForegroundColor Cyan
+Write-Host "`n📋 SECTION 5: APIM Inbound Policy (Managed Identity)" -ForegroundColor Cyan
 
 Write-Host "`nPolicy Details:"
 Write-Host "  When a request arrives at APIM gateway:"
-Write-Host "  1. Read the named value 'aoai-api-key' (encrypted secret stored in APIM)"
-Write-Host "  2. Inject it as 'api-key' HTTP header"
-Write-Host "  3. Forward to AOAI backend endpoint"
+Write-Host "  1. APIM acquires a Microsoft Entra token for https://cognitiveservices.azure.com"
+Write-Host "     using its system-assigned managed identity"
+Write-Host "  2. Token is injected as the Authorization header before forwarding to AOAI"
+Write-Host "  3. No API key is stored or transmitted"
 Write-Host ""
 Write-Host "  Policy XML:"
 Write-Host "  <policies>"
 Write-Host "    <inbound>"
-Write-Host "      <base/>"
-Write-Host "      <set-header name='api-key' exists-action='override'>"
-Write-Host "        <value>{{aoai-api-key}}</value>"
-Write-Host "      </set-header>"
+Write-Host "      <base />"
+Write-Host "      <authentication-managed-identity resource='https://cognitiveservices.azure.com' />"
+Write-Host "      <set-query-parameter name='api-version' exists-action='override'>"
+Write-Host "        <value>2024-10-21</value>"
+Write-Host "      </set-query-parameter>"
 Write-Host "    </inbound>"
-Write-Host "    <backend><base/></backend>"
-Write-Host "    <outbound><base/></outbound>"
-Write-Host "    <on-error><base/></on-error>"
+Write-Host "    <backend><base /></backend>"
+Write-Host "    <outbound><base /></outbound>"
+Write-Host "    <on-error><base /></on-error>"
 Write-Host "  </policies>"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -216,7 +232,7 @@ Write-Host "`n📋 SECTION 6: Complete End-to-End Flow" -ForegroundColor Cyan
 Write-Host "`n┌─────────────────────────────────────────────────────────────────┐"
 Write-Host "│ CUSTOMER CLIENT                                                 │"
 Write-Host "├─────────────────────────────────────────────────────────────────┤"
-Write-Host "│ 1. POST https://$apimGatewayHost/aoai/...                        │"
+Write-Host "│ 1. POST https://$apimGatewayHost/$ApimApiPath/...                   │"
 Write-Host "│    Headers: Content-Type: application/json                      │"
 Write-Host "│    Body: {\"messages\": [{\"role\": \"user\", ...}]}                │"
 Write-Host "└─────────────────────────────────────────────────────────────────┘"
@@ -231,9 +247,9 @@ Write-Host "│ Port: 443 (HTTPS)                                               
 Write-Host "│ Mode: No public IP, entirely within VNet                        │"
 Write-Host "│                                                                 │"
 Write-Host "│ INBOUND POLICY (Authentication):                               │"
-Write-Host "│   1. Extract named value: aoai-api-key                          │"
-Write-Host "│   2. Set HTTP header: api-key = <secret-key>                   │"
-Write-Host "│   3. Add Content-Type headers                                   │"
+Write-Host "│   1. Acquire Entra token via system-assigned managed identity    │"
+Write-Host "│   2. Inject token as Authorization header                       │"
+Write-Host "│   3. Forward to AOAI private endpoint                           │"
 Write-Host "└─────────────────────────────────────────────────────────────────┘"
 Write-Host "              │"
 Write-Host "              │ Backend Routing"

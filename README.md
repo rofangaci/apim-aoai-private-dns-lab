@@ -1,40 +1,216 @@
 # APIM to Azure OpenAI (Private) Lab
 
 ## Purpose
-Demonstrate networking and DNS design for Azure API Management (APIM) private access patterns to Azure OpenAI (AOAI), and validate end-to-end request flow over private paths.
 
-## DNS and networking focus
-This lab compares DNS behavior for both APIM connectivity modes:
+Demonstrate private networking and DNS design for Azure API Management (APIM) connecting to Azure OpenAI (AOAI), and validate end-to-end request flow where all traffic stays on private paths inside a VNet.
 
-1. APIM internal VNet mode
-- APIM gateway is reachable only from inside the VNet (or connected networks).
-- Clients resolve APIM hostnames through private DNS context linked to the VNet.
-- Default APIM internal hostname resolution is handled with the `azure-api.net` private DNS zone in this lab setup.
+The lab covers two APIM connectivity modes side by side:
 
-2. APIM private endpoint mode
-- Clients access APIM through a private endpoint NIC/IP.
-- Name resolution uses `privatelink.azure-api.net` so APIM gateway FQDN resolves to the private endpoint IP.
-- DNS zone link and A-record mapping are required for successful private routing.
+| Mode | How clients reach APIM | DNS zone used |
+|---|---|---|
+| Internal VNet injection | Private VIP inside the VNet | `azure-api.net` |
+| Private endpoint | Private endpoint NIC/IP | `privatelink.azure-api.net` |
 
-AOAI private endpoint resolution:
-- APIM backend resolution to AOAI uses `privatelink.openai.azure.com` so AOAI endpoint names resolve to private IPs.
-- This keeps APIM-to-AOAI traffic on private networking.
+AOAI is always accessed through a private endpoint (`privatelink.openai.azure.com`), so APIM-to-AOAI traffic never leaves the VNet.
 
-## What this repo contains
-- Infrastructure as code for the network and APIM lab deployment
-- APIM policy and deployment payload samples
-- Validation and operation test scripts
-- End-to-end demo scripts for APIM to AOAI flow
+## Architecture
 
-## Deployment code
-- `infra/apim-network-lab.bicep`
-- `deploy.json`
-- `deploy-body.json`
-- `apim-policy.json`
-- `apim-op-policy.json`
-- `scripts/dns-records-setup.ps1`
-- `scripts/demo-apim-to-aoai-flow.ps1`
-- `test-apim-operations.ps1`
+```
+Jumpbox VM (snet-jumpbox)
+    │
+    │  private DNS: <apim>.azure-api.net → APIM private VIP
+    ▼
+APIM internal gateway (snet-apim-int)
+    │  managed identity token injected by inbound policy
+    │
+    │  private DNS: <aoai>.privatelink.openai.azure.com → PE NIC IP
+    ▼
+AOAI private endpoint (snet-private-endpoints)
+    │
+    ▼
+Azure OpenAI (gpt-4o deployment)
+```
 
-## Lab result
-The lab validated DNS and private routing for both APIM modes (internal VNet and private endpoint) and demonstrated successful APIM-to-AOAI request flow with APIM operating as the controlled private gateway.
+## What the Bicep deploys
+
+`infra/apim-network-lab.bicep` creates everything in a single deployment:
+
+| Resource | Details |
+|---|---|
+| VNet | `10.10.0.0/16`, 3 subnets |
+| NSG | Required inbound rules for APIM Developer SKU (ports 3443, 6390) |
+| Private DNS zones | `azure-api.net`, `privatelink.azure-api.net`, `privatelink.openai.azure.com` |
+| DNS VNet links | One per zone |
+| APIM internal | Developer SKU, VNet-injected into `snet-apim-int`, system-assigned identity |
+| APIM private endpoint mode | Developer SKU, accessed via private endpoint |
+| Private endpoint (APIM PE mode) | NIC in `snet-private-endpoints`, DNS auto-registered |
+| DNS A records | Gateway, portal, developer, management, scm for internal APIM |
+| Azure OpenAI | Public access disabled, custom domain |
+| AOAI model deployment | gpt-4o `2024-11-20` |
+| AOAI private endpoint | NIC in `snet-private-endpoints`, DNS auto-registered |
+| Role assignment | APIM managed identity → `Cognitive Services OpenAI User` on AOAI |
+| Jumpbox VM | Ubuntu 22.04, `Standard_B2s`, no public IP |
+
+## Prerequisites
+
+- Azure CLI installed and logged in (`az login`)
+- Contributor role on the target subscription
+- A resource group already created
+
+```powershell
+az group create --name <resource-group> --location eastus2
+```
+
+## Step 1 — Deploy infrastructure
+
+All networking, APIM, AOAI, and the jumpbox are deployed in one command.
+
+```powershell
+az deployment group create `
+  --resource-group <resource-group> `
+  --name apim-lab-deploy `
+  --template-file infra/apim-network-lab.bicep `
+  --parameters `
+      apimInternalName=<apim-internal-name> `
+      apimPrivateName=<apim-private-name> `
+      publisherEmail=<your-email> `
+      publisherName=<your-name> `
+      aoaiName=<aoai-account-name> `
+      jumpboxAdminUsername=<vm-username> `
+      jumpboxAdminPassword=<vm-password>
+```
+
+> **Note:** APIM Developer SKU provisioning takes 30–45 minutes. Check status with:
+> ```powershell
+> az apim show -g <resource-group> -n <apim-internal-name> --query provisioningState -o tsv
+> ```
+
+Save the deployment outputs — you will need them in the next steps:
+
+```powershell
+az deployment group show -g <resource-group> -n apim-lab-deploy --query properties.outputs
+```
+
+Key outputs: `apimInternalPrivateIp`, `aoaiEndpoint`, `jumpboxPrivateIp`, `apimInternalGatewayUrl`.
+
+## Step 2 — Import the AOAI OpenAPI spec into APIM
+
+Once APIM provisioning state is `Succeeded`:
+
+```powershell
+$rg       = '<resource-group>'
+$apim     = '<apim-internal-name>'
+$aoai     = '<aoai-account-name>'
+$apiId    = 'aoai-4o'
+$spec     = 'https://raw.githubusercontent.com/Azure/azure-rest-api-specs/main/specification/cognitiveservices/data-plane/AzureOpenAI/inference/stable/2024-10-21/inference.json'
+$endpoint = az cognitiveservices account show -g $rg -n $aoai --query properties.endpoint -o tsv
+
+az apim api import -g $rg --service-name $apim --api-id $apiId `
+  --display-name 'AOAI GPT-4o API' --path aoai4o `
+  --specification-format OpenApiJson --specification-url $spec `
+  --service-url ($endpoint + 'openai') --protocols https --subscription-required false
+```
+
+## Step 3 — Apply managed identity policy
+
+Apply the inbound policy so APIM acquires an Entra token and forwards it to AOAI (no API key required):
+
+```powershell
+$subId = az account show --query id -o tsv
+$uri   = "https://management.azure.com/subscriptions/$subId/resourceGroups/$rg/providers/Microsoft.ApiManagement/service/$apim/apis/$apiId/policies/policy?api-version=2022-08-01"
+
+az rest --method put --uri $uri `
+  --body "@apim-op-policy.json" `
+  --headers 'Content-Type=application/json'
+```
+
+The policy in `apim-op-policy.json` uses `authentication-managed-identity` to obtain a token for `https://cognitiveservices.azure.com` — no secrets are stored or transmitted.
+
+## Step 4 — Validate from the jumpbox
+
+Get the jumpbox VM name:
+
+```powershell
+az vm list -g <resource-group> --query "[].name" -o tsv
+```
+
+Run a chat completion through APIM from the jumpbox using `az vm run-command`:
+
+```powershell
+$apimHost  = '<apim-internal-name>.azure-api.net'
+$modelName = 'gpt4o-demo'
+
+az vm run-command invoke -g <resource-group> -n vm-jumpbox `
+  --command-id RunShellScript `
+  --scripts "curl -k -sS -X POST 'https://$apimHost/aoai4o/deployments/$modelName/chat/completions?api-version=2024-10-21' -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"reply with exactly: APIM_PRIVATE_PATH_OK\"}],\"max_completion_tokens\":20,\"temperature\":0}'" `
+  --query "value[0].message" -o tsv
+```
+
+Expected: HTTP 200 with a `choices[0].message.content` of `APIM_PRIVATE_PATH_OK`.
+
+Alternatively, SSH/Bastion onto the jumpbox and run `curlsample` directly after setting env vars:
+
+```bash
+export APIM_HOST=<apim-internal-name>.azure-api.net
+export DEPLOYMENT_NAME=gpt4o-demo
+./curlsample
+```
+
+## Step 5 — Run the end-to-end demo script
+
+Collect the private IP values from the Step 1 deployment outputs, then run:
+
+```powershell
+.\scripts\demo-apim-to-aoai-flow.ps1 `
+  -Subscription <subscription-name-or-id> `
+  -ResourceGroup <resource-group> `
+  -ApimName <apim-internal-name> `
+  -AoaiName <aoai-account-name> `
+  -JumpboxName vm-jumpbox `
+  -JumpboxPrivateIp <jumpbox-private-ip> `
+  -ApimPrivateVip <apim-internal-private-ip> `
+  -AoaiPrivateEndpointIp <aoai-pe-ip>
+```
+
+## Step 6 — Test individual APIM operations (optional)
+
+```powershell
+.\test-apim-operations.ps1 `
+  -Subscription <subscription-name-or-id> `
+  -ResourceGroup <resource-group> `
+  -ApimName <apim-internal-name> `
+  -DeploymentId gpt4o-demo `
+  -VmName vm-jumpbox
+```
+
+This opens an interactive menu to invoke individual AOAI operations (chat completions, embeddings, etc.) through the APIM gateway.
+
+## Repo file reference
+
+| File | Purpose |
+|---|---|
+| `infra/apim-network-lab.bicep` | Full infrastructure — VNet, DNS, APIM, AOAI, jumpbox |
+| `apim-op-policy.json` | Managed identity inbound policy for the `aoai-4o` API |
+| `apim-policy.json` | Alternative API-key-based policy (reference only) |
+| `deploy-body.json` | AOAI gpt-4o model deployment payload (reference only) |
+| `scripts/demo-apim-to-aoai-flow.ps1` | End-to-end demo with network topology output |
+| `scripts/dns-records-setup.ps1` | Standalone DNS A record setup (not needed when using Bicep) |
+| `test-apim-operations.ps1` | Interactive operation tester via jumpbox |
+| `curlsample` | Minimal curl test — run on jumpbox |
+
+## Troubleshooting
+
+**APIM stuck in `Updating` state**  
+Developer SKU internal mode takes up to 45 min. Do not rerun the deployment — wait and poll `provisioningState`.
+
+**401 / 403 from AOAI**  
+- Confirm the APIM system-assigned identity exists: `az apim show -g <rg> -n <apim> --query identity`
+- Confirm the role assignment landed: `az role assignment list --scope <aoai-resource-id>`
+
+**DNS not resolving from jumpbox**  
+- Confirm the private DNS zones are linked to the VNet: `az network private-dns link vnet list -g <rg> -z azure-api.net`
+- Confirm A records exist: `az network private-dns record-set a list -g <rg> -z azure-api.net`
+
+**curl returns connection refused**  
+- Confirm the jumpbox subnet can reach `snet-apim-int` (no NSG blocking port 443)
+- Confirm APIM provisioning state is `Succeeded`

@@ -11,22 +11,37 @@
     .\test-apim-operations.ps1
 #>
 
+param(
+    [Parameter(Mandatory)]
+    [string]$Subscription,
+
+    [Parameter(Mandatory)]
+    [string]$ResourceGroup,
+
+    [Parameter(Mandatory)]
+    [string]$ApimName,
+
+    [Parameter(Mandatory)]
+    [string]$DeploymentId,
+
+    [Parameter(Mandatory)]
+    [string]$VmName,
+
+    [string]$ApiPath = 'aoai4o',
+
+    [string]$ApiVersion = '2024-10-21'
+)
+
 $ErrorActionPreference = 'Stop'
 
-# Configuration
-$subscription = '<subscription-id-or-name>'
-$resourceGroup = '<resource-group-name>'
-$apimName = '<apim-service-name>'
-$apiPath = 'aoai4o'
-$deploymentId = '<aoai-deployment-name>'
-$apiVersion = '2024-10-21'
-$vmName = '<jumpbox-vm-name>'
-
-if ($subscription -like '<*' -or $resourceGroup -like '<*' -or $apimName -like '<*' -or $deploymentId -like '<*' -or $vmName -like '<*') {
-    Write-Host "Please update script placeholders before running." -ForegroundColor Red
-    Write-Host "Required: subscription, resourceGroup, apimName, deploymentId, vmName" -ForegroundColor Yellow
-    exit 1
-}
+# Alias locals to match rest of script
+$subscription  = $Subscription
+$resourceGroup = $ResourceGroup
+$apimName      = $ApimName
+$apiPath       = $ApiPath
+$deploymentId  = $DeploymentId
+$apiVersion    = $ApiVersion
+$vmName        = $VmName
 
 # Set subscription
 Write-Host "`n[INFO] Setting subscription context..." -ForegroundColor Cyan
