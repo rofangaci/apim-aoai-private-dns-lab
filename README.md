@@ -57,6 +57,13 @@ Azure OpenAI (gpt-4o deployment)
 - Contributor role on the target subscription
 - A resource group already created
 
+If you are starting from a new environment (for example Cloud Shell), clone the repo first:
+
+```powershell
+git clone https://github.com/rofangaci/apim-aoai-private-dns-lab.git
+Set-Location .\apim-aoai-private-dns-lab
+```
+
 Supported deployment regions for this template are enforced by the Bicep `location` parameter (`@allowed`).
 Default region is `centralus`.
 
@@ -201,6 +208,26 @@ Collect the private IP values from the Step 1 deployment outputs, then run:
 
 This opens an interactive menu to invoke individual AOAI operations (chat completions, embeddings, etc.) through the APIM gateway.
 
+## Step 7 — Run deployment validation script
+
+Run the validator to confirm infrastructure, DNS, APIM, AOAI, private endpoints, RBAC, and optional API/policy post-configuration checks.
+
+```powershell
+.\scripts\validate-deployment.ps1 -ResourceGroup <resource-group>
+```
+
+Optional parameters:
+
+- `-DeploymentName apim-lab-deploy`
+- `-ExpectedApiId aoai-4o`
+- `-ExpectedModelDeploymentName gpt4o-demo`
+
+Behavior:
+
+- Script prints `PASS`, `WARN`, and `FAIL` checks.
+- Exit code `0` when no failures are found.
+- Exit code `1` when one or more failures are found.
+
 ## Repo file reference
 
 | File | Purpose |
@@ -210,6 +237,7 @@ This opens an interactive menu to invoke individual AOAI operations (chat comple
 | `apim-policy.json` | Alternative API-key-based policy (reference only) |
 | `deploy-body.json` | AOAI gpt-4o model deployment payload (reference only) |
 | `scripts/demo-apim-to-aoai-flow.ps1` | End-to-end demo with network topology output |
+| `scripts/validate-deployment.ps1` | End-to-end deployment validation script with pass/fail summary |
 | `scripts/dns-records-setup.ps1` | Standalone DNS A record setup (not needed when using Bicep) |
 | `test-apim-operations.ps1` | Interactive operation tester via jumpbox |
 | `curlsample` | Minimal curl test — run on jumpbox |
