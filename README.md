@@ -37,7 +37,7 @@ Azure OpenAI (gpt-4o deployment)
 
 | Resource | Details |
 |---|---|
-| VNet | `10.10.0.0/16`, 3 subnets |
+| VNet | Parameterized CIDR (default `10.10.0.0/24`), 3 parameterized subnets |
 | NSG | Required inbound rules for APIM Developer SKU (ports 3443, 6390) |
 | Private DNS zones | `azure-api.net`, `privatelink.azure-api.net`, `privatelink.openai.azure.com` |
 | DNS VNet links | One per zone |
@@ -57,6 +57,12 @@ Azure OpenAI (gpt-4o deployment)
 - Contributor role on the target subscription
 - A resource group already created
 
+Supported deployment regions for this template are enforced by the Bicep `location` parameter (`@allowed`).
+Default region is `centralus`.
+
+Allowed values:
+`australiaeast`, `brazilsouth`, `canadacentral`, `canadaeast`, `centralus`, `eastus`, `eastus2`, `francecentral`, `germanywestcentral`, `italynorth`, `japaneast`, `jioindiacentral`, `jioindiawest`, `koreacentral`, `northcentralus`, `norwayeast`, `polandcentral`, `southafricanorth`, `southcentralus`, `southeastasia`, `southindia`, `spaincentral`, `swedencentral`, `switzerlandnorth`, `switzerlandwest`, `uaenorth`, `uksouth`, `westeurope`, `westus`, `westus3`.
+
 ```powershell
 az group create --name <resource-group> --location eastus2
 ```
@@ -71,6 +77,7 @@ az deployment group create `
   --name apim-lab-deploy `
   --template-file infra/apim-network-lab.bicep `
   --parameters `
+  location=<region> `
       apimInternalName=<apim-internal-name> `
       apimPrivateName=<apim-private-name> `
       publisherEmail=<your-email> `
@@ -79,6 +86,15 @@ az deployment group create `
       jumpboxAdminUsername=<vm-username> `
       jumpboxAdminPassword=<vm-password>
 ```
+
+Optional network parameters (defaults shown):
+
+- `vnetAddressPrefix=10.10.0.0/24`
+- `apimSubnetAddressPrefix=10.10.0.0/26`
+- `privateEndpointSubnetAddressPrefix=10.10.0.64/26`
+- `jumpboxSubnetAddressPrefix=10.10.0.128/26`
+
+If you omit `location`, deployment uses `centralus`.
 
 > **Note:** APIM Developer SKU provisioning takes 30–45 minutes. Check status with:
 > ```powershell

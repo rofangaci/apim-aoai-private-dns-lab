@@ -1,5 +1,37 @@
+@allowed([
+  'australiaeast'
+  'brazilsouth'
+  'canadacentral'
+  'canadaeast'
+  'centralus'
+  'eastus'
+  'eastus2'
+  'francecentral'
+  'germanywestcentral'
+  'italynorth'
+  'japaneast'
+  'jioindiacentral'
+  'jioindiawest'
+  'koreacentral'
+  'northcentralus'
+  'norwayeast'
+  'polandcentral'
+  'southafricanorth'
+  'southcentralus'
+  'southeastasia'
+  'southindia'
+  'spaincentral'
+  'swedencentral'
+  'switzerlandnorth'
+  'switzerlandwest'
+  'uaenorth'
+  'uksouth'
+  'westeurope'
+  'westus'
+  'westus3'
+])
 @description('Location for all resources')
-param location string = resourceGroup().location
+param location string = 'centralus'
 
 @description('APIM name for internal VNet injection lab')
 param apimInternalName string
@@ -21,6 +53,18 @@ param aoaiModelDeploymentName string = 'gpt4o-demo'
 
 @description('VNet name')
 param vnetName string = 'vnet-apim-netlab-${uniqueString(resourceGroup().id)}'
+
+@description('VNet CIDR block')
+param vnetAddressPrefix string = '10.10.0.0/24'
+
+@description('APIM internal subnet CIDR block')
+param apimSubnetAddressPrefix string = '10.10.0.0/26'
+
+@description('Private endpoints subnet CIDR block')
+param privateEndpointSubnetAddressPrefix string = '10.10.0.64/26'
+
+@description('Jumpbox subnet CIDR block')
+param jumpboxSubnetAddressPrefix string = '10.10.0.128/26'
 
 @description('Admin username for the jumpbox VM')
 param jumpboxAdminUsername string
@@ -78,27 +122,27 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' = {
   location: location
   properties: {
     addressSpace: {
-      addressPrefixes: ['10.10.0.0/16']
+      addressPrefixes: [vnetAddressPrefix]
     }
     subnets: [
       {
         name: apimSubnetName
         properties: {
-          addressPrefix: '10.10.1.0/24'
+          addressPrefix: apimSubnetAddressPrefix
           networkSecurityGroup: { id: apimNsg.id }
         }
       }
       {
         name: peSubnetName
         properties: {
-          addressPrefix: '10.10.2.0/24'
+          addressPrefix: privateEndpointSubnetAddressPrefix
           privateEndpointNetworkPolicies: 'Disabled'
         }
       }
       {
         name: jumpboxSubnetName
         properties: {
-          addressPrefix: '10.10.3.0/24'
+          addressPrefix: jumpboxSubnetAddressPrefix
         }
       }
     ]
