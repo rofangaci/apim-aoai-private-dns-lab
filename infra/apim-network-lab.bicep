@@ -347,6 +347,9 @@ resource aoaiModelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
 resource aoaiPrivateEndpoint 'Microsoft.Network/privateEndpoints@2023-09-01' = {
   name: 'pep-aoai-${aoaiName}'
   location: location
+  dependsOn: [
+    aoaiModelDeployment
+  ]
   properties: {
     subnet: {
       id: '${vnet.id}/subnets/${peSubnetName}'
