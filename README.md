@@ -64,7 +64,7 @@ Allowed values:
 `australiaeast`, `brazilsouth`, `canadacentral`, `canadaeast`, `centralus`, `eastus`, `eastus2`, `francecentral`, `germanywestcentral`, `italynorth`, `japaneast`, `jioindiacentral`, `jioindiawest`, `koreacentral`, `northcentralus`, `norwayeast`, `polandcentral`, `southafricanorth`, `southcentralus`, `southeastasia`, `southindia`, `spaincentral`, `swedencentral`, `switzerlandnorth`, `switzerlandwest`, `uaenorth`, `uksouth`, `westeurope`, `westus`, `westus3`.
 
 ```powershell
-az group create --name <resource-group> --location eastus2
+az group create --name <resource-group> --location centralus
 ```
 
 ## Step 1 — Deploy infrastructure
