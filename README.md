@@ -149,7 +149,27 @@ az rest --method put --uri $uri `
 
 The policy in `apim-op-policy.json` uses `authentication-managed-identity` to obtain a token for `https://cognitiveservices.azure.com` — no secrets are stored or transmitted.
 
-## Step 4 — Validate from the jumpbox
+## Step 4 — Run deployment validation script
+
+Run the validator to confirm infrastructure, DNS, APIM, AOAI, private endpoints, RBAC, and optional API/policy post-configuration checks.
+
+```powershell
+.\scripts\validate-deployment.ps1 -ResourceGroup <resource-group>
+```
+
+Optional parameters:
+
+- `-DeploymentName apim-lab-deploy`
+- `-ExpectedApiId aoai-4o`
+- `-ExpectedModelDeploymentName gpt4o-demo`
+
+Behavior:
+
+- Script prints `PASS`, `WARN`, and `FAIL` checks.
+- Exit code `0` when no failures are found.
+- Exit code `1` when one or more failures are found.
+
+## Step 5 — Validate from the jumpbox
 
 ### Option A: Use the test script (recommended)
 
@@ -191,7 +211,7 @@ export DEPLOYMENT_NAME=gpt4o-demo
 
 Expected response from either option: HTTP 200 OK with a chat completion containing `APIM_PRIVATE_PATH_OK`.
 
-## Step 5 — Run the end-to-end demo script
+## Step 6 — Run the end-to-end demo script
 
 Run the end-to-end demo script:
 
@@ -208,7 +228,7 @@ Run the end-to-end demo script:
 `-JumpboxPrivateIp`, `-ApimPrivateVip`, and `-AoaiPrivateEndpointIp` are optional overrides.
 If omitted, the script auto-resolves values from deployment outputs and resource queries.
 
-## Step 6 — Test individual APIM operations (optional)
+## Step 7 — Test individual APIM operations (optional)
 
 ```powershell
 .\test-apim-operations.ps1 `
@@ -220,26 +240,6 @@ If omitted, the script auto-resolves values from deployment outputs and resource
 ```
 
 This opens an interactive menu to invoke individual AOAI operations (chat completions, embeddings, etc.) through the APIM gateway.
-
-## Step 7 — Run deployment validation script
-
-Run the validator to confirm infrastructure, DNS, APIM, AOAI, private endpoints, RBAC, and optional API/policy post-configuration checks.
-
-```powershell
-.\scripts\validate-deployment.ps1 -ResourceGroup <resource-group>
-```
-
-Optional parameters:
-
-- `-DeploymentName apim-lab-deploy`
-- `-ExpectedApiId aoai-4o`
-- `-ExpectedModelDeploymentName gpt4o-demo`
-
-Behavior:
-
-- Script prints `PASS`, `WARN`, and `FAIL` checks.
-- Exit code `0` when no failures are found.
-- Exit code `1` when one or more failures are found.
 
 ## Repo file reference
 
