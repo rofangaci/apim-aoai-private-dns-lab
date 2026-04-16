@@ -7,7 +7,7 @@
 .DESCRIPTION
     End-to-end customer demo showing:
     - Jumpbox can reach internal APIM gateway via private DNS
-    - APIM injects Authorization header with AOAI API key via policy
+    - APIM injects Authorization header with Entra token via managed identity policy
     - Request is routed to AOAI private endpoint
     - All communication stays within private IP space and private DNS zones
     
@@ -36,14 +36,13 @@ param(
     [Parameter(Mandatory)]
     [string]$JumpboxName,
 
-    [Parameter(Mandatory)]
     [string]$JumpboxPrivateIp,
 
-    [Parameter(Mandatory)]
     [string]$ApimPrivateVip,
 
-    [Parameter(Mandatory)]
     [string]$AoaiPrivateEndpointIp,
+
+    [string]$DeploymentName = 'apim-lab-deploy',
 
     [string]$AoaiDeploymentName = 'gpt4o-demo',
 
@@ -58,13 +57,47 @@ $ErrorActionPreference = 'Stop'
 
 az account set --subscription $Subscription | Out-Null
 
+if (-not $ApimPrivateVip -or -not $JumpboxPrivateIp) {
+    try {
+        $outputs = az deployment group show -g $ResourceGroup -n $DeploymentName --query properties.outputs -o json | ConvertFrom-Json
+        if (-not $ApimPrivateVip -and $outputs.apimInternalPrivateIp.value) {
+            $ApimPrivateVip = $outputs.apimInternalPrivateIp.value
+        }
+        if (-not $JumpboxPrivateIp -and $outputs.jumpboxPrivateIp.value) {
+            $JumpboxPrivateIp = $outputs.jumpboxPrivateIp.value
+        }
+    }
+    catch {
+        Write-Host "[WARN] Could not read deployment outputs from '$DeploymentName'. Falling back to resource queries." -ForegroundColor Yellow
+    }
+}
+
+if (-not $JumpboxPrivateIp) {
+    $JumpboxPrivateIp = az vm show -d -g $ResourceGroup -n $JumpboxName --query privateIps -o tsv 2>$null
+}
+
+if (-not $AoaiPrivateEndpointIp) {
+    $AoaiPrivateEndpointIp = az network private-endpoint list -g $ResourceGroup --query "[?privateLinkServiceConnections[0].groupIds[0]=='account'] | [0].customDnsConfigs[0].ipAddresses[0]" -o tsv 2>$null
+    if (-not $AoaiPrivateEndpointIp) {
+        $AoaiPrivateEndpointIp = az network private-endpoint list -g $ResourceGroup --query "[?privateLinkServiceConnections[0].groupIds[0]=='account'] | [0].ipConfigurations[0].privateIPAddress" -o tsv 2>$null
+    }
+}
+
+if (-not $ApimPrivateVip) {
+    $ApimPrivateVip = az apim show -g $ResourceGroup -n $ApimName --query "privateIPAddresses[0]" -o tsv 2>$null
+}
+
+if (-not $ApimPrivateVip -or -not $JumpboxPrivateIp -or -not $AoaiPrivateEndpointIp) {
+    throw "Unable to resolve required private IP values. Provide -ApimPrivateVip, -JumpboxPrivateIp, and -AoaiPrivateEndpointIp explicitly."
+}
+
 $apimGatewayHost = "$ApimName.azure-api.net"
 $aoaiPrivateDnsHost = "$AoaiName.privatelink.openai.azure.com"
 $aoaiPublicEndpointHost = "$AoaiName.openai.azure.com"
 
-Write-Host "`n" + "=" * 80
+Write-Host ("`n" + ("=" * 80))
 Write-Host "CUSTOMER DEMO: APIM Internal Injection Mode → AOAI Private Endpoint"
-Write-Host "=" * 80
+Write-Host ("=" * 80)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 1: Show Network Architecture
@@ -145,6 +178,7 @@ if ($dnsTest2 -match [regex]::Escape($AoaiPrivateEndpointIp)) {
 # SECTION 4: Test from Jumpbox - HTTP Connectivity to APIM
 # ─────────────────────────────────────────────────────────────────────────────
 Write-Host "`n📋 SECTION 4: HTTP Connectivity Test (Jumpbox → APIM)" -ForegroundColor Cyan
+Write-Host "  (Uses same HTTP test logic as scripts/test-apim-chat.ps1)" -ForegroundColor DarkGray
 
 Write-Host "`nTest: POST request to APIM proxy endpoint..."
 Write-Host "  Deployment Name: $AoaiDeploymentName"
@@ -162,41 +196,126 @@ $requestBody = @{
     temperature = 0
 } | ConvertTo-Json -Compress
 
-$chatUrl = "https://$apimGatewayHost/$ApimApiPath/deployments/$AoaiDeploymentName/chat/completions"
-
 $curlScript = @"
+#!/bin/bash
+set -euo pipefail
 cat > /tmp/payload.json <<'JSON'
 $requestBody
 JSON
-curl -k -s -o /tmp/resp.json -w 'HTTP_STATUS:%{http_code}' -X POST '$chatUrl' -H 'Content-Type: application/json' --data-binary @/tmp/payload.json
-echo
-cat /tmp/resp.json
+
+curl -k -i -sS -X POST "https://$apimGatewayHost/$ApimApiPath/deployments/$AoaiDeploymentName/chat/completions?api-version=2024-10-21" \
+  -H "Content-Type: application/json" \
+  --data-binary @/tmp/payload.json
 "@
 
-$httpTest = az vm run-command invoke -g $ResourceGroup -n $JumpboxName `
-    --command-id RunShellScript `
-    --scripts $curlScript `
-    --query "value[0].message" -o tsv
+$curlScript = $curlScript.Replace("`r`n", "`n")
+$curlScriptB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($curlScript))
 
-Write-Host "`nResponse from APIM Gateway:"
-if ($httpTest -match '200|201|400') {
-    if ($httpTest -match '200') {
-        Write-Host "  ✓ HTTP 200 OK - Request successful!"
-    } elseif ($httpTest -match '400') {
-        Write-Host "  ✓ HTTP 400 - APIM received request (client/format error)"
-    } else {
-        Write-Host "  ✓ HTTP $([regex]::Match($httpTest, 'HTTP_STATUS:(\d+)').Groups[1].Value)"
+Write-Host "`nExecuting curl on jumpbox..." -ForegroundColor Yellow
+
+$httpRunRaw = az vm run-command invoke -g $ResourceGroup -n $JumpboxName `
+    --command-id RunShellScript `
+    --scripts "echo $curlScriptB64 | base64 -d | bash" `
+    -o json
+
+$exitCode = $LASTEXITCODE
+
+if ($exitCode -ne 0) {
+    Write-Host ""
+    Write-Host "ERROR: Failed to execute command on jumpbox." -ForegroundColor Red
+    Write-Host "Exit Code: $exitCode" -ForegroundColor Red
+    Write-Host "Output: $httpRunRaw" -ForegroundColor Red
+    throw "Azure CLI command failed with exit code $exitCode"
+}
+
+try {
+    $httpRun = $httpRunRaw | ConvertFrom-Json
+}
+catch {
+    Write-Host ""
+    Write-Host "ERROR: Failed to parse response as JSON." -ForegroundColor Red
+    Write-Host "Response: $httpRunRaw" -ForegroundColor Red
+    throw $_
+}
+
+if (-not $httpRun.value -or $httpRun.value.Count -eq 0) {
+    throw "Run command returned an empty response. Jumpbox may not be accessible."
+}
+
+$httpTest = $httpRun.value[0].message
+
+if (-not $httpTest) {
+    throw 'Run command returned an empty response.'
+}
+
+$stdoutOnly = $httpTest
+$stderrOnly = ''
+
+if ($httpTest -match '\[stdout\]') {
+    $stdoutSplit = $httpTest -split '\[stdout\]', 2
+    if ($stdoutSplit.Count -eq 2) {
+        $stdoutOnly = $stdoutSplit[1]
     }
-    Write-Host "`n  Gateway is reachable and responding!"
-    Write-Host "  Network path verified: Jumpbox -> APIM Gateway (private IP $ApimPrivateVip) -> AOAI (private IP $AoaiPrivateEndpointIp)"
-    Write-Host "`n  ✓ SECURITY PROOF: All communication is on private IPs within VNet"
+}
+
+if ($stdoutOnly -match '\[stderr\]') {
+    $stderrSplit = $stdoutOnly -split '\[stderr\]', 2
+    $stdoutOnly = $stderrSplit[0]
+    if ($stderrSplit.Count -eq 2) {
+        $stderrOnly = $stderrSplit[1].Trim()
+    }
+}
+
+$stdoutOnly = $stdoutOnly.Trim()
+
+Write-Host ""
+Write-Host "Response from APIM Gateway:" -ForegroundColor Green
+Write-Host "============================" -ForegroundColor Green
+
+try {
+    # Show status if present
+    if ($stdoutOnly -match "HTTP/1.1 (\d+)") {
+        $statusCode = $matches[1]
+        Write-Host "HTTP Status: $statusCode" -ForegroundColor $(if ($statusCode -eq "200") { "Green" } else { "Red" })
+    }
+
+    # Parse body JSON from stdout
+    $jsonStart = $stdoutOnly.IndexOf('{')
+    $jsonEnd = $stdoutOnly.LastIndexOf('}')
+    if ($jsonStart -ge 0 -and $jsonEnd -gt $jsonStart) {
+        $jsonBody = $stdoutOnly.Substring($jsonStart, $jsonEnd - $jsonStart + 1)
+        $parsedBody = $jsonBody | ConvertFrom-Json
+        
+        if ($parsedBody.choices -and $parsedBody.choices.Count -gt 0 -and $parsedBody.choices[0].message.content) {
+            Write-Host "Message: $($parsedBody.choices[0].message.content)" -ForegroundColor White
+        }
+        
+        if ($parsedBody.usage) {
+            Write-Host "Tokens - Prompt: $($parsedBody.usage.prompt_tokens), Completion: $($parsedBody.usage.completion_tokens), Total: $($parsedBody.usage.total_tokens)" -ForegroundColor Cyan
+        }
+    }
+}
+catch {
+    Write-Host "Error parsing response: $_" -ForegroundColor Yellow
+}
+
+if ($statusCode -eq '200' -or $statusCode -eq '400') {
+    Write-Host ""
+    Write-Host "  ✓ Gateway is reachable and responding!"
+    Write-Host "  ✓ Network path verified: Jumpbox → APIM Gateway (private IP $ApimPrivateVip) → AOAI (private IP $AoaiPrivateEndpointIp)"
+    Write-Host ""
+    Write-Host "  ✓ SECURITY PROOF: All communication is on private IPs within VNet"
     Write-Host "    - Jumpbox: $JumpboxPrivateIp"
     Write-Host "    - APIM Gateway: $ApimPrivateVip"
     Write-Host "    - AOAI Private Endpoint: $AoaiPrivateEndpointIp"
     Write-Host "    ✓ No public internet hops"
-} else {
-    Write-Host "  Response: $($httpTest | Select-Object -First 200 -ErrorAction SilentlyContinue)"
 }
+else {
+    Write-Host ""
+    Write-Host "  Response (raw):"
+    Write-Host $stdoutOnly
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 5: Show APIM Policy (Managed Identity Auth)
@@ -234,7 +353,7 @@ Write-Host "│ CUSTOMER CLIENT                                                 
 Write-Host "├─────────────────────────────────────────────────────────────────┤"
 Write-Host "│ 1. POST https://$apimGatewayHost/$ApimApiPath/...                   │"
 Write-Host "│    Headers: Content-Type: application/json                      │"
-Write-Host "│    Body: {\"messages\": [{\"role\": \"user\", ...}]}                │"
+Write-Host "│    Body: messages=[{role=user, content=...}]                    │"
 Write-Host "└─────────────────────────────────────────────────────────────────┘"
 Write-Host "              │"
 Write-Host "              │ Private DNS Resolution"
@@ -261,8 +380,8 @@ Write-Host "│ Private IP: $AoaiPrivateEndpointIp (PE NIC)                     
 Write-Host "│ Private DNS: $aoaiPrivateDnsHost                                 │"
 Write-Host "│ Deployment: $AoaiDeploymentName                                  │"
 Write-Host "│                                                                 │"
-Write-Host "│ Receives request with api-key header ✓                          │"
-Write-Host "│ Validates key ✓                                                 │"
+Write-Host "│ Receives Authorization: Bearer <managed-identity-token> ✓      │"
+Write-Host "│ Validates Entra token audience/issuer ✓                         │"
 Write-Host "│ Processes: /openai/deployments/{deployment}/chat/completions    │"
 Write-Host "│ Returns: Chat completion response                               │"
 Write-Host "└─────────────────────────────────────────────────────────────────┘"
@@ -272,7 +391,7 @@ Write-Host "              ↓"
 Write-Host "┌─────────────────────────────────────────────────────────────────┐"
 Write-Host "│ CUSTOMER CLIENT (receives response)                             │"
 Write-Host "│ - Status: 200 OK                                                │"
-Write-Host "│ - Content: {\"choices\": [...], \"usage\": {...}}                    │"
+Write-Host "│ - Content: choices[...] and usage {...}                         │"
 Write-Host "└─────────────────────────────────────────────────────────────────┘"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -290,13 +409,13 @@ Write-Host "`n✓ AOAI Private Endpoint:"
 Write-Host "  • No internet route to AOAI data plane"
 Write-Host "  • Private DNS prevents DNS hijacking"
 Write-Host "  • Network isolation: only reachable from authorized VNets"
-Write-Host "  • API key never transmitted over public internet"
+Write-Host "  • Entra tokens validated at AOAI endpoint"
 
-Write-Host "`n✓ Key Injection via APIM Policy:"
-Write-Host "  • API keys stored securely as named values in APIM vault"
-Write-Host "  • Keys never exposed in client URLs or query strings"
-Write-Host "  • Policy-based injection: centralized control"
-Write-Host "  • Audit trail: each injected authentication event logged"
+Write-Host "`n✓ Managed Identity Token Injection via APIM Policy:"
+Write-Host "  • APIM acquires token using system-assigned managed identity"
+Write-Host "  • Authorization header is injected in APIM policy"
+Write-Host "  • No secrets or API keys required on client side"
+Write-Host "  • Audit trail exists for APIM and AOAI control/data plane events"
 
 Write-Host "`n✓ Combined Architecture:"
 Write-Host "  Customer → APIM (private) → AOAI (private endpoint)"
@@ -304,9 +423,9 @@ Write-Host "  ✓ Zero-trust networking"
 Write-Host "  ✓ Encrypted end-to-end"
 Write-Host "  ✓ No data exfiltration risk"
 
-Write-Host "`n" + "=" * 80
+Write-Host ("`n" + ("=" * 80))
 Write-Host "DEMO COMPLETE"
-Write-Host "=" * 80
+Write-Host ("=" * 80)
 Write-Host "`nNext Steps:"
 Write-Host "1. Deploy your gpt-4o-mini or gpt-35-turbo model to AOAI"
 Write-Host "2. Update AoaiDeploymentName parameter with your deployment name"

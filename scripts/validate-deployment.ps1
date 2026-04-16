@@ -26,6 +26,17 @@ $ErrorActionPreference = 'Stop'
 $failureCount = 0
 $warningCount = 0
 
+function Test-AzCliSession {
+    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+        throw 'Azure CLI (az) is not installed or not on PATH.'
+    }
+
+    $null = az account show --query id -o tsv 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Azure CLI is not authenticated. Run 'az login' and retry."
+    }
+}
+
 function Write-Pass {
     param([string]$Message)
     Write-Host "[PASS] $Message" -ForegroundColor Green
@@ -45,6 +56,17 @@ function Write-Warn {
 
 Write-Host "Validating deployment in resource group: $ResourceGroup" -ForegroundColor Cyan
 Write-Host ''
+
+try {
+    Test-AzCliSession
+    Write-Pass 'Azure CLI is available and authenticated'
+}
+catch {
+    Write-Fail $_.Exception.Message
+    Write-Host ''
+    Write-Host "Validation complete. Failures: $failureCount  Warnings: $warningCount" -ForegroundColor Cyan
+    exit 1
+}
 
 try {
     $deploymentState = az deployment group show -g $ResourceGroup -n $DeploymentName --query properties.provisioningState -o tsv 2>$null
@@ -101,7 +123,7 @@ foreach ($zone in $requiredZones) {
     }
 }
 
-$apimServices = az apim list -g $ResourceGroup -o json | ConvertFrom-Json
+$apimServices = @(az apim list -g $ResourceGroup -o json | ConvertFrom-Json)
 if (-not $apimServices -or $apimServices.Count -lt 2) {
     Write-Fail 'Expected two APIM services (internal + private mode)'
 }
@@ -121,7 +143,7 @@ if ($apimInternal) {
         Write-Warn "Internal APIM provisioning state: $($apimInternal.provisioningState)"
     }
 
-    if ($apimInternal.identity.principalId) {
+    if ($apimInternal.identity -and $apimInternal.identity.principalId) {
         Write-Pass 'Internal APIM managed identity is enabled'
     }
     else {
@@ -159,7 +181,7 @@ else {
         Write-Warn "AOAI public network access is $($aoai.properties.publicNetworkAccess)"
     }
 
-    $modelDeployments = az cognitiveservices account deployment list -g $ResourceGroup -n $aoai.name --query "[].name" -o tsv
+    $modelDeployments = @(az cognitiveservices account deployment list -g $ResourceGroup -n $aoai.name --query "[].name" -o tsv)
     if ($modelDeployments -contains $ExpectedModelDeploymentName) {
         Write-Pass "AOAI model deployment exists: $ExpectedModelDeploymentName"
     }
@@ -171,7 +193,7 @@ else {
     }
 }
 
-$privateEndpointGroupIds = az network private-endpoint list -g $ResourceGroup --query "[].privateLinkServiceConnections[0].groupIds[0]" -o tsv
+$privateEndpointGroupIds = @(az network private-endpoint list -g $ResourceGroup --query "[].privateLinkServiceConnections[0].groupIds[0]" -o tsv)
 if ($privateEndpointGroupIds -contains 'Gateway') {
     Write-Pass 'APIM private endpoint (Gateway group) exists'
 }
@@ -186,7 +208,8 @@ else {
     Write-Fail 'AOAI private endpoint (account group) not found'
 }
 
-$jumpboxName = az vm list -g $ResourceGroup --query "[?starts_with(name,'vm-jumpbox')]|[0].name" -o tsv
+$vmList = @(az vm list -g $ResourceGroup -o json | ConvertFrom-Json)
+$jumpboxName = ($vmList | Where-Object { $_.name -like 'vm-jumpbox*' } | Select-Object -First 1).name
 if ($jumpboxName) {
     Write-Pass "Jumpbox VM found: $jumpboxName"
     $vmPowerState = az vm get-instance-view -g $ResourceGroup -n $jumpboxName --query "instanceView.statuses[?starts_with(code,'PowerState/')].displayStatus | [0]" -o tsv
@@ -198,7 +221,7 @@ else {
     Write-Fail 'Jumpbox VM not found'
 }
 
-if ($apimInternal -and $apimInternal.identity.principalId -and $aoai -and $aoai.id) {
+if ($apimInternal -and $apimInternal.identity -and $apimInternal.identity.principalId -and $aoai -and $aoai.id) {
     $roleAssignmentCount = az role assignment list --assignee-object-id $apimInternal.identity.principalId --scope $aoai.id --query "[?roleDefinitionName=='Cognitive Services OpenAI User'] | length(@)" -o tsv
     if ([int]$roleAssignmentCount -ge 1) {
         Write-Pass 'RBAC assignment exists: Cognitive Services OpenAI User'

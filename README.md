@@ -151,37 +151,49 @@ The policy in `apim-op-policy.json` uses `authentication-managed-identity` to ob
 
 ## Step 4 — Validate from the jumpbox
 
-Get the jumpbox VM name:
+### Option A: Use the test script (recommended)
 
 ```powershell
-az vm list -g <resource-group> --query "[].name" -o tsv
+.\scripts\test-apim-chat.ps1 `
+  -ResourceGroup <resource-group> `
+  -ApimHost '<apim-internal-name>.azure-api.net' `
+  -Message "reply with exactly: APIM_PRIVATE_PATH_OK"
 ```
 
-Run a chat completion through APIM from the jumpbox using `az vm run-command`:
+You can omit `-Message` and the script will prompt you interactively.
+
+If your VM name is not `vm-jumpbox`, add:
 
 ```powershell
-$apimHost  = '<apim-internal-name>.azure-api.net'
-$modelName = 'gpt4o-demo'
-
-az vm run-command invoke -g <resource-group> -n vm-jumpbox `
-  --command-id RunShellScript `
-  --scripts "curl -k -sS -X POST 'https://$apimHost/aoai4o/deployments/$modelName/chat/completions?api-version=2024-10-21' -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"reply with exactly: APIM_PRIVATE_PATH_OK\"}],\"max_completion_tokens\":20,\"temperature\":0}'" `
-  --query "value[0].message" -o tsv
+  -JumpboxName <your-jumpbox-vm-name>
 ```
 
-Expected: HTTP 200 with a `choices[0].message.content` of `APIM_PRIVATE_PATH_OK`.
+This script handles shell escaping automatically and prints a concise summary (`HTTP Status`, `Message`, `Tokens`).
 
-Alternatively, SSH/Bastion onto the jumpbox and run `curlsample` directly after setting env vars:
+Use `-ShowRawResponse` if you also want full headers and raw JSON body.
+
+### Option B: SSH into the jumpbox and run curlsample
+
+Get the jumpbox public IP (if present) or use Bastion:
+
+```powershell
+az vm show -d -g <resource-group> -n vm-jumpbox --query publicIps -o tsv
+```
+
+SSH to the jumpbox:
 
 ```bash
+ssh azureuser@<jumpbox-public-ip>
 export APIM_HOST=<apim-internal-name>.azure-api.net
 export DEPLOYMENT_NAME=gpt4o-demo
 ./curlsample
 ```
 
+Expected response from either option: HTTP 200 OK with a chat completion containing `APIM_PRIVATE_PATH_OK`.
+
 ## Step 5 — Run the end-to-end demo script
 
-Collect the private IP values from the Step 1 deployment outputs, then run:
+Run the end-to-end demo script:
 
 ```powershell
 .\scripts\demo-apim-to-aoai-flow.ps1 `
@@ -190,10 +202,11 @@ Collect the private IP values from the Step 1 deployment outputs, then run:
   -ApimName <apim-internal-name> `
   -AoaiName <aoai-account-name> `
   -JumpboxName vm-jumpbox `
-  -JumpboxPrivateIp <jumpbox-private-ip> `
-  -ApimPrivateVip <apim-internal-private-ip> `
-  -AoaiPrivateEndpointIp <aoai-pe-ip>
+  -DeploymentName apim-lab-deploy
 ```
+
+`-JumpboxPrivateIp`, `-ApimPrivateVip`, and `-AoaiPrivateEndpointIp` are optional overrides.
+If omitted, the script auto-resolves values from deployment outputs and resource queries.
 
 ## Step 6 — Test individual APIM operations (optional)
 
