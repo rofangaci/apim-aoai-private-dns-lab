@@ -46,6 +46,28 @@ if (-not $Message) {
     throw 'Message cannot be empty. Provide -Message or enter a value when prompted.'
 }
 
+function Resolve-JumpboxName {
+    param(
+        [string]$ResourceGroup,
+        [string]$PreferredName
+    )
+
+    $preferredExists = az vm show -g $ResourceGroup -n $PreferredName --query name -o tsv 2>$null
+    if ($preferredExists) {
+        return $PreferredName
+    }
+
+    $fallbackName = az vm list -g $ResourceGroup --query "[?starts_with(name, 'vm-jumpbox')][0].name" -o tsv 2>$null
+    if ($fallbackName) {
+        Write-Host "[WARN] Jumpbox '$PreferredName' not found. Using '$fallbackName'." -ForegroundColor Yellow
+        return $fallbackName
+    }
+
+    return $PreferredName
+}
+
+$JumpboxName = Resolve-JumpboxName -ResourceGroup $ResourceGroup -PreferredName $JumpboxName
+
 Write-Host "Testing APIM chat completion from jumpbox..." -ForegroundColor Cyan
 Write-Host "  Resource Group: $ResourceGroup"
 Write-Host "  Jumpbox: $JumpboxName"

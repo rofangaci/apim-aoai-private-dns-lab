@@ -57,8 +57,45 @@ $ErrorActionPreference = 'Stop'
 
 az account set --subscription $Subscription | Out-Null
 
+function Get-LatestSucceededDeploymentName {
+    param([string]$ResourceGroup)
+
+    return az deployment group list -g $ResourceGroup --query "sort_by([?properties.provisioningState=='Succeeded'], &properties.timestamp)[-1].name" -o tsv 2>$null
+}
+
+function Resolve-JumpboxName {
+    param(
+        [string]$ResourceGroup,
+        [string]$PreferredName
+    )
+
+    $preferredExists = az vm show -g $ResourceGroup -n $PreferredName --query name -o tsv 2>$null
+    if ($preferredExists) {
+        return $PreferredName
+    }
+
+    $fallbackName = az vm list -g $ResourceGroup --query "[?starts_with(name, 'vm-jumpbox')][0].name" -o tsv 2>$null
+    if ($fallbackName) {
+        Write-Host "[WARN] Jumpbox '$PreferredName' not found. Using '$fallbackName'." -ForegroundColor Yellow
+        return $fallbackName
+    }
+
+    return $PreferredName
+}
+
+$JumpboxName = Resolve-JumpboxName -ResourceGroup $ResourceGroup -PreferredName $JumpboxName
+
 if (-not $ApimPrivateVip -or -not $JumpboxPrivateIp) {
     try {
+        $deploymentState = az deployment group show -g $ResourceGroup -n $DeploymentName --query properties.provisioningState -o tsv 2>$null
+        if ($deploymentState -ne 'Succeeded') {
+            $fallbackDeploymentName = Get-LatestSucceededDeploymentName -ResourceGroup $ResourceGroup
+            if ($fallbackDeploymentName) {
+                Write-Host "[WARN] Deployment '$DeploymentName' state is '$deploymentState'. Using '$fallbackDeploymentName' for output lookup." -ForegroundColor Yellow
+                $DeploymentName = $fallbackDeploymentName
+            }
+        }
+
         $outputs = az deployment group show -g $ResourceGroup -n $DeploymentName --query properties.outputs -o json | ConvertFrom-Json
         if (-not $ApimPrivateVip -and $outputs.apimInternalPrivateIp.value) {
             $ApimPrivateVip = $outputs.apimInternalPrivateIp.value
@@ -68,7 +105,26 @@ if (-not $ApimPrivateVip -or -not $JumpboxPrivateIp) {
         }
     }
     catch {
-        Write-Host "[WARN] Could not read deployment outputs from '$DeploymentName'. Falling back to resource queries." -ForegroundColor Yellow
+        $fallbackDeploymentName = Get-LatestSucceededDeploymentName -ResourceGroup $ResourceGroup
+        if ($fallbackDeploymentName -and $fallbackDeploymentName -ne $DeploymentName) {
+            Write-Host "[WARN] Could not read deployment outputs from '$DeploymentName'. Retrying with '$fallbackDeploymentName'." -ForegroundColor Yellow
+            try {
+                $DeploymentName = $fallbackDeploymentName
+                $outputs = az deployment group show -g $ResourceGroup -n $DeploymentName --query properties.outputs -o json | ConvertFrom-Json
+                if (-not $ApimPrivateVip -and $outputs.apimInternalPrivateIp.value) {
+                    $ApimPrivateVip = $outputs.apimInternalPrivateIp.value
+                }
+                if (-not $JumpboxPrivateIp -and $outputs.jumpboxPrivateIp.value) {
+                    $JumpboxPrivateIp = $outputs.jumpboxPrivateIp.value
+                }
+            }
+            catch {
+                Write-Host "[WARN] Could not read deployment outputs from '$DeploymentName'. Falling back to resource queries." -ForegroundColor Yellow
+            }
+        }
+        else {
+            Write-Host "[WARN] Could not read deployment outputs from '$DeploymentName'. Falling back to resource queries." -ForegroundColor Yellow
+        }
     }
 }
 

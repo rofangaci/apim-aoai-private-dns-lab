@@ -162,10 +162,12 @@ Optional parameters:
 - `-DeploymentName apim-lab-deploy`
 - `-ExpectedApiId aoai-4o`
 - `-ExpectedModelDeploymentName gpt4o-demo`
+- `-SkipDeploymentRecordCheck`
 
 Behavior:
 
 - Script prints `PASS`, `WARN`, and `FAIL` checks.
+- If `-DeploymentName` is missing/failed, the validator auto-falls back to the latest `Succeeded` deployment record when available.
 - Exit code `0` when no failures are found.
 - Exit code `1` when one or more failures are found.
 
@@ -187,6 +189,8 @@ If your VM name is not `vm-jumpbox`, add:
 ```powershell
   -JumpboxName <your-jumpbox-vm-name>
 ```
+
+If the provided jumpbox name is not found, the script automatically falls back to the first VM name matching `vm-jumpbox*` in the resource group.
 
 This script handles shell escaping automatically and prints a concise summary (`HTTP Status`, `Message`, `Tokens`).
 
@@ -227,6 +231,7 @@ Run the end-to-end demo script:
 
 `-JumpboxPrivateIp`, `-ApimPrivateVip`, and `-AoaiPrivateEndpointIp` are optional overrides.
 If omitted, the script auto-resolves values from deployment outputs and resource queries.
+If `-DeploymentName` is missing/failed, the script falls back to the latest `Succeeded` deployment for output lookup.
 
 ## Step 7 — Test individual APIM operations (optional)
 

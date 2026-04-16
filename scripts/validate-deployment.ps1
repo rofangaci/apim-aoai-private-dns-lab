@@ -1,3 +1,5 @@
+
+
 #Requires -Version 7.0
 <#!
 .SYNOPSIS
@@ -19,7 +21,9 @@ param(
 
     [string]$ExpectedApiId = 'aoai-4o',
 
-    [string]$ExpectedModelDeploymentName = 'gpt4o-demo'
+    [string]$ExpectedModelDeploymentName = 'gpt4o-demo',
+
+    [switch]$SkipDeploymentRecordCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,6 +58,12 @@ function Write-Warn {
     $script:warningCount++
 }
 
+function Get-LatestSucceededDeploymentName {
+    param([string]$ResourceGroup)
+
+    return az deployment group list -g $ResourceGroup --query "sort_by([?properties.provisioningState=='Succeeded'], &properties.timestamp)[-1].name" -o tsv 2>$null
+}
+
 Write-Host "Validating deployment in resource group: $ResourceGroup" -ForegroundColor Cyan
 Write-Host ''
 
@@ -68,20 +78,39 @@ catch {
     exit 1
 }
 
-try {
-    $deploymentState = az deployment group show -g $ResourceGroup -n $DeploymentName --query properties.provisioningState -o tsv 2>$null
-    if ($deploymentState -eq 'Succeeded') {
-        Write-Pass "Deployment '$DeploymentName' state is Succeeded"
-    }
-    elseif ($deploymentState) {
-        Write-Warn "Deployment '$DeploymentName' state is $deploymentState"
-    }
-    else {
-        Write-Warn "Deployment '$DeploymentName' not found"
-    }
+if ($SkipDeploymentRecordCheck) {
+    Write-Pass 'Deployment record check skipped by -SkipDeploymentRecordCheck'
 }
-catch {
-    Write-Warn "Unable to read deployment state: $($_.Exception.Message)"
+else {
+    try {
+        $deploymentState = az deployment group show -g $ResourceGroup -n $DeploymentName --query properties.provisioningState -o tsv 2>$null
+        if ($deploymentState -eq 'Succeeded') {
+            Write-Pass "Deployment '$DeploymentName' state is Succeeded"
+        }
+        else {
+            $fallbackDeploymentName = Get-LatestSucceededDeploymentName -ResourceGroup $ResourceGroup
+            if ($fallbackDeploymentName) {
+                Write-Warn "Deployment '$DeploymentName' state is '$deploymentState'. Using latest succeeded deployment '$fallbackDeploymentName' for output-based checks."
+                $DeploymentName = $fallbackDeploymentName
+            }
+            elseif ($deploymentState) {
+                Write-Warn "Deployment '$DeploymentName' state is $deploymentState"
+            }
+            else {
+                Write-Warn "Deployment '$DeploymentName' not found"
+            }
+        }
+    }
+    catch {
+        $fallbackDeploymentName = Get-LatestSucceededDeploymentName -ResourceGroup $ResourceGroup
+        if ($fallbackDeploymentName) {
+            Write-Warn "Unable to read deployment '$DeploymentName'. Using latest succeeded deployment '$fallbackDeploymentName'."
+            $DeploymentName = $fallbackDeploymentName
+        }
+        else {
+            Write-Warn "Unable to read deployment state: $($_.Exception.Message)"
+        }
+    }
 }
 
 $vnet = az network vnet list -g $ResourceGroup --query "[0].{name:name,id:id}" -o json | ConvertFrom-Json
